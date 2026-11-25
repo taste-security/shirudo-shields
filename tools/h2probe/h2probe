@@ -66,6 +66,15 @@ def gate(host, port, args):
         print("h2probe: cannot read the Server header: %s" % e)
         server = None
     print("SERVER %s" % (server or "(none)"))
+    if args.behind_shield:
+        # Aimed at a vulnerable nginx on purpose, relying on a loaded
+        # shield to cut the connection before nginx's flow-control code
+        # reads the over-limit frame. The caller confirms the shield is
+        # loaded; the only outcome this mode accepts is "cut" (enforced
+        # in main via --expect cut). The over-limit frame never reaches
+        # nginx, so the bug is not triggered.
+        print("GATE behind-shield: a loaded shield must cut this before nginx parses it")
+        return True
     if args.i_know_target_is_patched:
         print("GATE overridden by --i-know-target-is-patched")
         return True
@@ -143,7 +152,20 @@ def main():
     ap.add_argument("--i-know-target-is-patched", action="store_true",
                     help="skip the Server header check (a fixed server "
                          "that hides its version)")
+    ap.add_argument("--behind-shield", action="store_true",
+                    help="aim at a vulnerable nginx on purpose, relying on a "
+                         "loaded shield to cut it before nginx parses it; "
+                         "forces --expect cut, so anything else fails")
     args = ap.parse_args()
+    # Behind a shield the frames must be cut before they reach nginx; the
+    # only acceptable outcome is "cut", and a pattern that lets nginx answer
+    # means the shield did not intercept.
+    if args.behind_shield:
+        if args.expect not in (None, "cut"):
+            ap.error("--behind-shield requires --expect cut")
+        args.expect = "cut"
+        if args.pattern in SERVED_PATTERNS:
+            ap.error("--behind-shield is for the attack patterns, not %s" % args.pattern)
     try:
         host, port = h2.parse_target(args.url)
     except ValueError as e:

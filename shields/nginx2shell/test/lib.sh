@@ -194,6 +194,16 @@ killed_lines()
 		grep -c 'exited on signal' || :
 }
 
+# Worker exits from a crash: SIGSEGV (11), SIGABRT (6), SIGBUS (7) or
+# SIGILL (4). nginx's flow-control bug, if the frames reached it, would
+# show up here. The guard's own stop is SIGKILL (9), which this does not
+# count, so a crash is told apart from an interception.
+crash_lines()
+{
+	cat "$N2S_ROOT"/var/log/nginx/n2s-*.error.log 2>/dev/null |
+		grep -cE 'exited on signal (4|6|7|11)' || :
+}
+
 https_status()
 {
 	curl -sk --http2 --max-time 20 -o /dev/null -w '%{http_code} %{http_version}' "$1"

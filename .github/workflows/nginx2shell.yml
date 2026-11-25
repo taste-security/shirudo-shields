@@ -34,5 +34,5 @@ jobs:
     uses: ./.github/workflows/shield-ci.yml
     with:
       shield: nginx2shell
-      scenarios: baseline load contain legit h2guard regression unload
+      scenarios: baseline load contain legit h2guard intercept regression unload
       title: nginx2shell · Shirudo shield for CVE-2026-123007
