@@ -63,6 +63,18 @@ fi
 say "nginx2shell · Shirudo shield for CVE-2026-123007 · nginx 1.31.8 on :8443, fixed 1.31.9 on :9443"
 sh "$demo" start
 
+# Record what this run tested, so a result can be reproduced: the kernel,
+# and each nginx build with the OpenSSL it was built with and runs with.
+root=${N2S_ROOT:-/var/lib/nginx2shell-demo}
+{
+	echo "kernel $(uname -r)"
+	for bin in /usr/sbin/nginx /usr/local/sbin/nginx; do
+		echo "$bin:"
+		chroot "$root" "$bin" -V 2>&1 | grep -E "version|OpenSSL" | sed 's/^/  /'
+	done
+} >"$N2S_OUT/versions.txt" 2>&1
+sed 's/^/      /' "$N2S_OUT/versions.txt"
+
 failed=0
 for scenario in "$@"; do
 	say "$(title "$scenario")"
