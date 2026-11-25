@@ -174,6 +174,36 @@ number of RST_STREAM frames the connection had sent, the action
 `socket`, `create`, `rename`, `write`, `truncate`), the process, the
 file name or the peer address and port, and the count.
 
+## How it is tested
+
+CI (`.github/workflows/nginx2shell.yml`) builds this package, boots
+Shirudo's test VM and runs nginx 1.31.8 (vulnerable range) and 1.31.9
+(fixed) on it, both with HTTP/2, TLS and embedded Perl. The scenarios in
+`test/` run in order and fail the job on any check that fails:
+
+1. `baseline`: no shield. A SIMULATED post-exploit step, served by
+   nginx's embedded Perl, makes a real 1.31.8 worker run `/bin/sh`,
+   connect out and drop a `.html` and a `.txt` file; all of it works.
+2. `load`: both upatches load, and the nginx binaries carry the label.
+3. `contain`: the kernel refuses the shell, the connection and the
+   `.html` drop; the `.txt` drop no rule denies still works.
+4. `legit`: ordinary HTTP/2 (parallel requests, an 8 MiB download,
+   interleaved streams cancelled with data in flight) is all served,
+   with no guard hit and no worker killed.
+5. `h2guard`: the over-limit flow-control pattern, sent to fixed 1.31.9
+   only, is cut before nginx answers.
+6. `regression`: the edges a change could break unnoticed. A window at
+   exactly 2^31-1 is served and one past it is cut; five attacks in a
+   row are each cut while the master survives and a fresh worker
+   serves; workers forked by an nginx reload stay contained and
+   guarded; HTTP/1.1 and HTTP/2 work afterwards with no hit.
+7. `unload`: the SIMULATED step works again, so every refusal before
+   was the shield's.
+
+No step runs an exploit. The over-limit pattern is the RFC 9113 section
+6.9.1 conformance input, and `tools/h2probe` sends it only to a server
+whose `Server` header names nginx 1.31.9 or later.
+
 ## Limits
 
 - The guard is on the TLS path of one libssl file. HTTP/2 without TLS,

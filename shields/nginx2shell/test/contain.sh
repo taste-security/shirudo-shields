@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: BSD-2-Clause
 #
 # Scenario 2, contain: the shield is loaded. The same SIMULATED
-# post-exploit step on nginx 1.31.8: the kernel refuses the worker's exec
-# and its connect out, the response says so, the refusals are in the
+# post-exploit step on nginx 1.31.8: the kernel refuses the worker's exec,
+# its connect out and its .html file drop, while a .txt drop no rule
+# denies still works. The response says so, the refusals are in the
 # contain upatch's map, and nginx keeps serving.
 
 . "$(dirname "$0")/lib.sh"
@@ -25,6 +26,8 @@ if [ "$(field connect "$W/rce")" = refused ]; then
 else
 	fail "the worker's connect was not refused: $(grep '^connect=' "$W/rce")"
 fi
+expect_drop html refused "$W/rce"
+expect_drop txt ok "$W/rce"
 
 status=$(https_status "$N2S_VULN_URL/")
 check "nginx 1.31.8 keeps serving: GET / is $status" [ "$status" = "200 2" ]

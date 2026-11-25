@@ -41,6 +41,8 @@ COPY n2s-run /usr/local/bin/n2s-run
 # them, and sit in an architecture directory that is not on libperl's
 # @INC, so each version gets its own copy, which its configuration names
 # with perl_modules.
+# /var/lib/n2s-drop is owned by the worker, so the SIMULATED file drops of
+# SimulatedRce.pm succeed without the shield and only its deny rules refuse them.
 RUN set -e; \
 	cmp /opt/patched-libs/libssl.so.3 /usr/lib/libssl.so.3; \
 	cmp /opt/patched-libs/libcrypto.so.3 /usr/lib/libcrypto.so.3; \
@@ -56,6 +58,7 @@ RUN set -e; \
 	for i in vulnerable patched; do \
 		mkdir -p "/var/cache/nginx/n2s-$i"; \
 	done; \
+	install -d -o nginx -g nginx -m 0755 /var/lib/n2s-drop; \
 	dd if=/dev/urandom of=/usr/share/nginx/n2s/big.bin bs=1M count=8 2>/dev/null; \
 	/usr/sbin/nginx -v 2>&1 | grep -qx 'nginx version: nginx/1.31.8'; \
 	/usr/local/sbin/nginx -v 2>&1 | grep -qx 'nginx version: nginx/1.31.9'; \

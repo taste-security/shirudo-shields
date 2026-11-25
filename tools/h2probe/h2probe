@@ -14,9 +14,21 @@ connection of its own, once the server's SETTINGS came:
 
 Two increments, as h2spec sends: the second is over the limit whatever
 the window was, which matters after a cancel, when the server may have
-spent its window on DATA for the cancelled stream first. For each form
-h2probe reports what came back after the pattern:
+spent its window on DATA for the cancelled stream first.
 
+Three boundary forms pin the limit exactly, for regression tests. The
+connection window starts at 65535 (RFC 9113 section 6.9.2):
+
+  at-limit         WINDOW_UPDATE(stream 0, 2^31-1 - 65535), the window
+                   now exactly 2^31-1 and legal, then HEADERS GET /
+  one-over         the same increment, then WINDOW_UPDATE(stream 0, 1):
+                   one past the limit
+  settings-at-max  SETTINGS_INITIAL_WINDOW_SIZE = 2^31-1, the legal
+                   maximum, then HEADERS GET /
+
+For each form h2probe reports what came back after the pattern:
+
+  RESULT served status=<n>  the server answered the request normally
   RESULT answered GOAWAY error=FLOW_CONTROL_ERROR ...  nginx answered
   RESULT cut <how>        the connection ended before any answer
   RESULT silent           nothing within the timeout
@@ -42,6 +54,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import h2frames as h2  # noqa: E402
 
 MIN_PATCHED = (1, 31, 9)
+INITIAL_CONN_WINDOW = 65535
+PATTERNS = ("direct", "rst-then-credit", "at-limit", "one-over", "settings-at-max")
 
 
 def gate(host, port, args):
@@ -71,13 +85,22 @@ def gate(host, port, args):
 def probe(host, port, pattern, args):
     conn = h2.Connection(host, port, args.timeout, args.cafile)
     try:
-        conn.start(timeout=args.timeout)
+        conn.start(timeout=args.timeout,
+                   initial_window=h2.MAX_WINDOW if pattern == "settings-at-max" else None)
         over = h2.window_update(0, h2.MAX_WINDOW) * 2
+        to_max = h2.window_update(0, h2.MAX_WINDOW - INITIAL_CONN_WINDOW)
+        get_root = h2.headers(1, h2.request_headers(conn.authority, "/"))
         if pattern == "direct":
             out = over
-        else:
+        elif pattern == "rst-then-credit":
             out = (h2.headers(1, h2.request_headers(conn.authority, args.path))
                    + h2.rst_stream(1, h2.CANCEL) + over)
+        elif pattern == "at-limit":
+            out = to_max + get_root
+        elif pattern == "one-over":
+            out = to_max + h2.window_update(0, 1)
+        else:  # settings-at-max
+            out = get_root
         conn.send(out)
         print("SENT %s" % pattern)
         seen = []
@@ -94,6 +117,8 @@ def probe(host, port, pattern, args):
                 conn.send(h2.ping_ack(payload))
             if ftype == h2.GOAWAY:
                 return "answered GOAWAY error=%s" % h2.goaway_error(payload), seen
+            if ftype == h2.HEADERS and stream == 1:
+                return "served status=%s" % h2.response_status(payload), seen
     finally:
         conn.close()
 
@@ -103,11 +128,11 @@ def main():
         description=__doc__.split("\n\n")[0],
         epilog="Sends the pattern only to nginx 1.31.9 or later.")
     ap.add_argument("url", help="https://host:port of a FIXED nginx")
-    ap.add_argument("--pattern", choices=("direct", "rst-then-credit", "both"),
-                    default="both")
+    ap.add_argument("--pattern", choices=PATTERNS + ("both",), default="both",
+                    help="both: direct and rst-then-credit")
     ap.add_argument("--path", default="/big.bin",
                     help="what rst-then-credit requests and cancels")
-    ap.add_argument("--expect", choices=("answered", "cut"),
+    ap.add_argument("--expect", choices=("served", "answered", "cut"),
                     help="exit 1 unless every pattern gave this outcome")
     ap.add_argument("--timeout", type=float, default=5.0)
     ap.add_argument("--cafile", help="verify the server with this CA")

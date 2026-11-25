@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# usage: n2s-run start | stop | foreground
+# usage: n2s-run start | stop | reload | foreground
 #
 # Starts or stops both nginx instances of the demo image: 1.31.8 on 8443
 # and 1.31.9 on 9443. start leaves both as daemons (the chroot on a
@@ -23,12 +23,16 @@ stop)
 	"$VULN" -c "$VULN_CONF" -s quit 2>/dev/null || :
 	"$PATCHED" -c "$PATCHED_CONF" -s quit 2>/dev/null || :
 	;;
+reload)
+	"$VULN" -c "$VULN_CONF" -s reload
+	"$PATCHED" -c "$PATCHED_CONF" -s reload
+	;;
 foreground)
 	"$VULN" -c "$VULN_CONF"
 	exec "$PATCHED" -c "$PATCHED_CONF" -g 'daemon off;'
 	;;
 *)
-	echo "usage: $0 start | stop | foreground" >&2
+	echo "usage: $0 start | stop | reload | foreground" >&2
 	exit 2
 	;;
 esac

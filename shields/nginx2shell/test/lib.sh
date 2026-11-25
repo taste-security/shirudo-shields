@@ -130,6 +130,27 @@ expect_simulated_rce_runs()
 		fail "the worker's connect to 192.0.2.1:4444 did not go out: $(grep '^connect=' "$W/rce")"
 		;;
 	esac
+	for kind in html txt; do
+		expect_drop "$kind" ok "$W/rce"
+	done
+}
+
+# expect_drop <html|txt> <ok|refused> <response>: the SIMULATED file drop
+# of that kind in /var/lib/n2s-drop, a directory the worker owns, had that
+# outcome. Without the shield both drops work, so a refusal under it is the
+# shield's deny rule and not the file's permissions.
+expect_drop()
+{
+	got=$(field "drop_$1" "$3")
+	line=$(grep "^drop_$1=" "$3")
+	if [ "$got" = "$2" ]; then
+		case $2 in
+		ok) pass "the worker created a .$1 file in /var/lib/n2s-drop" ;;
+		*) pass "the kernel refused the worker's .$1 file drop ($(errno_of "drop_$1" "$3"))" ;;
+		esac
+	else
+		fail "the .$1 file drop: expected $2, got: ${line:-no drop_$1 line}"
+	fi
 }
 
 # loaded <upatch>: whether upatch list shows it loaded.

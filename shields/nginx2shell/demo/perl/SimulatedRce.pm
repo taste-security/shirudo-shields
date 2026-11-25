@@ -12,6 +12,14 @@
 #   exec=refused errno=EACCES             the kernel refused the exec
 #   connect=ok | attempted errno=<E>      the kernel let the connect go out
 #   connect=refused errno=EPERM           the kernel refused the connect
+#
+# It also drops two files in /var/lib/n2s-drop, a directory the worker
+# owns, and removes each one it made:
+#
+#   drop_html=ok | refused errno=EACCES   a .html file, the stand-in for a
+#                                         webshell or a defaced page
+#   drop_txt=ok | refused errno=<E>       a .txt file, a control: no rule
+#                                         of the shield denies it
 
 package SimulatedRce;
 
@@ -19,12 +27,13 @@ use strict;
 use warnings;
 use nginx;
 use Errno ();
-use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
+use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK O_WRONLY O_CREAT O_TRUNC);
 use POSIX ();
 use Socket qw(PF_INET SOCK_STREAM SOL_SOCKET SO_ERROR inet_aton sockaddr_in);
 
 my $C2_ADDR = '192.0.2.1';
 my $C2_PORT = 4444;
+my $DROP_DIR = '/var/lib/n2s-drop';
 
 sub errno_name {
 	my ($n) = @_;
@@ -111,6 +120,22 @@ sub try_connect {
 	return (refused($name) ? 'refused' : 'attempted', "errno=$name");
 }
 
+# Create $DROP_DIR/<name> for writing, as a dropped file would be, and
+# remove it again when that worked.
+sub try_create {
+	my ($name) = @_;
+	my $path = "$DROP_DIR/$name";
+	my $fh;
+	unless (sysopen($fh, $path, O_WRONLY | O_CREAT | O_TRUNC, 0644)) {
+		my $errname = errno_name($! + 0);
+		return (refused($errname) ? 'refused' : 'error', "errno=$errname");
+	}
+	syswrite($fh, "SIMULATED drop\n");
+	close $fh;
+	unlink $path;
+	return ('ok', '');
+}
+
 sub handler {
 	my $r = shift;
 	$r->send_http_header('text/plain');
@@ -118,10 +143,14 @@ sub handler {
 
 	my ($exec, $exec_detail) = try_exec();
 	my ($conn, $conn_detail) = try_connect();
+	my ($html, $html_detail) = try_create('simulated-drop.html');
+	my ($txt, $txt_detail) = try_create('simulated-drop.txt');
 	my $body = "SIMULATED post-exploit step (no exploit, a test fixture)\n"
 		. "worker pid=$$ uid=$< nginx=" . $nginx::VERSION . "\n"
 		. "exec=$exec $exec_detail\n"
-		. "connect=$conn $conn_detail target=$C2_ADDR:$C2_PORT\n";
+		. "connect=$conn $conn_detail target=$C2_ADDR:$C2_PORT\n"
+		. "drop_html=$html $html_detail path=$DROP_DIR/simulated-drop.html\n"
+		. "drop_txt=$txt $txt_detail path=$DROP_DIR/simulated-drop.txt\n";
 	$r->print($body);
 	return OK;
 }

@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: BSD-2-Clause
 #
 # usage: nginx2shell-demo.sh install <archive> | start | stop | remove
-#                            | status | workers <vulnerable|patched> | logs
+#                            | reload | status | logs
+#                            | master <vulnerable|patched>
+#                            | workers <vulnerable|patched>
 #
 # Runs the two nginx instances of build.sh's image on a Shirudo target,
 # as root, in a chroot under /var/lib/nginx2shell-demo (N2S_ROOT):
@@ -35,7 +37,7 @@ libssl=${N2S_LIBSSL:-/usr/lib/libssl.so.3}
 
 usage()
 {
-	echo "usage: $0 install <archive> | start | stop | remove | status | workers <vulnerable|patched> | logs" >&2
+	echo "usage: $0 install <archive> | start | stop | remove | reload | status | logs | master <vulnerable|patched> | workers <vulnerable|patched>" >&2
 	exit 2
 }
 
@@ -164,6 +166,33 @@ status)
 		printf '%s master=%s workers=%s\n' "$i" "$(master "$i")" \
 			"$(workers "$i" | paste -sd, -)"
 	done
+	;;
+reload)
+	# A HUP: each master forks fresh workers and the old ones finish what
+	# they serve. Returns once both instances run no worker of before.
+	[ -x "$root/usr/local/bin/n2s-run" ] || die "not installed; run $0 install <archive>"
+	old=$(workers vulnerable; workers patched)
+	chroot "$root" /usr/local/bin/n2s-run reload
+	for _ in $(seq 100); do
+		now=" $( (workers vulnerable; workers patched) | tr '\n' ' ') "
+		stale=0
+		for pid in $old; do
+			case $now in
+			*" $pid "*) stale=1 ;;
+			esac
+		done
+		if [ "$stale" -eq 0 ] && [ -n "$(workers vulnerable)" ] &&
+			[ -n "$(workers patched)" ]; then
+			echo "reloaded: vulnerable=$(workers vulnerable | paste -sd, -) patched=$(workers patched | paste -sd, -)"
+			exit 0
+		fi
+		sleep 0.1
+	done
+	die "the reload did not replace every worker within 10 s"
+	;;
+master)
+	[ $# -eq 2 ] || usage
+	master "$2"
 	;;
 workers)
 	[ $# -eq 2 ] || usage

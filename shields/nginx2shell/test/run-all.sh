@@ -4,8 +4,8 @@
 # usage: run-all.sh [--narrate] [<scenario>...]
 #
 # Runs the nginx2shell scenarios on a Shirudo target, as root, in the
-# order of CONTRACT.md: baseline (shield not loaded), load, contain,
-# legit, h2guard, unload. Every scenario runs even when one before it
+# order: baseline (shield not loaded), load, contain, legit, h2guard,
+# regression, unload. Every scenario runs even when one before it
 # failed, so that unload always runs. Prints one "SCENARIO <name> PASS"
 # or "FAIL" line each and exits 1 if any failed. --narrate prints a short
 # line before each scenario, for a recording; the demo is this run.
@@ -19,7 +19,7 @@ if [ "${1:-}" = --narrate ]; then
 	narrate=1
 	shift
 fi
-[ $# -gt 0 ] || set -- baseline load contain legit h2guard unload
+[ $# -gt 0 ] || set -- baseline load contain legit h2guard regression unload
 
 N2S_OUT=${N2S_OUT:-${SHIELD_OUT:-/var/tmp/nginx2shell-test}}
 export N2S_OUT
@@ -39,10 +39,11 @@ title()
 	case $1 in
 	baseline) echo "1 · Without the shield: a SIMULATED post-exploit shell runs as the nginx worker" ;;
 	load) echo "2 · Load the Shirudo shield" ;;
-	contain) echo "3 · Same SIMULATED step with the shield: shell and callback refused, nginx keeps serving" ;;
+	contain) echo "3 · Same SIMULATED step with the shield: shell, callback and webshell drop refused, nginx keeps serving" ;;
 	legit) echo "4 · Normal HTTP/2 traffic: every request served, nothing cut" ;;
 	h2guard) echo "5 · The over-limit flow-control pattern, sent only to fixed nginx 1.31.9: the guard cuts it first" ;;
-	unload) echo "6 · Unload the shield: the SIMULATED shell runs again" ;;
+	regression) echo "6 · Regression: the exact limit, a sustained attack, an nginx reload, then normal traffic" ;;
+	unload) echo "7 · Unload the shield: the SIMULATED shell runs again" ;;
 	*) echo "$1" ;;
 	esac
 }
