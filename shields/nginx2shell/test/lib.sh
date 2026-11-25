@@ -307,7 +307,7 @@ guard_enforced()
 	check "$label: the $inst error log shows its worker $pid exited on SIGKILL (signal 9)" [ "$ok" = 1 ]
 	check "$label: no worker crashed in this case ($(crash_lines) crash signals total)" \
 		[ "$(crash_lines)" = "${GB_CRASH:-0}" ]
-	case " $(workers "$inst" | tr '\n' ' ') " in
+	case " $(workers "$inst" | tr ',' ' ') " in
 	*" $pid "*) fail "$label: the killed worker $pid is still running" ;;
 	*) pass "$label: the killed worker $pid is gone" ;;
 	esac

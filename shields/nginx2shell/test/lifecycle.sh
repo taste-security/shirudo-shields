@@ -55,16 +55,17 @@ check "the guard tracks the $COUNT held connections ($e0 -> $e1 entries)" \
 	[ "${e1:-0}" -ge $((e0 + COUNT)) ]
 
 master_pid=$(master patched)
-old_workers=$(workers patched)
-info "nginx 1.31.9 master $master_pid, workers $(printf '%s' "$old_workers" | tr '\n' ' ')"
+# workers prints the pids comma separated.
+old_workers=$(workers patched | tr ',' ' ')
+info "nginx 1.31.9 master $master_pid, workers $old_workers"
 for pid in $old_workers; do
-	kill -9 "$pid" 2>/dev/null
+	kill -9 "$pid" || fail "could not SIGKILL worker $pid"
 done
 
 # Wait for every killed worker to be gone and replaced.
 replaced=0
 for _ in $(seq 50); do
-	now=" $(workers patched | tr '\n' ' ') "
+	now=" $(workers patched | tr ',' ' ') "
 	stale=0
 	for pid in $old_workers; do
 		case $now in *" $pid "*) stale=1 ;; esac
