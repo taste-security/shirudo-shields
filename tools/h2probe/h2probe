@@ -56,6 +56,7 @@ import h2frames as h2  # noqa: E402
 MIN_PATCHED = (1, 31, 9)
 INITIAL_CONN_WINDOW = 65535
 PATTERNS = ("direct", "rst-then-credit", "at-limit", "one-over", "settings-at-max")
+SERVED_PATTERNS = ("at-limit", "settings-at-max")
 
 
 def gate(host, port, args):
@@ -117,7 +118,10 @@ def probe(host, port, pattern, args):
                 conn.send(h2.ping_ack(payload))
             if ftype == h2.GOAWAY:
                 return "answered GOAWAY error=%s" % h2.goaway_error(payload), seen
-            if ftype == h2.HEADERS and stream == 1:
+            # Only the legal boundary forms end on the response. The others
+            # read on: in rst-then-credit nginx answers the request before it
+            # reads the cancel and the over-limit increments behind it.
+            if ftype == h2.HEADERS and stream == 1 and pattern in SERVED_PATTERNS:
                 return "served status=%s" % h2.response_status(payload), seen
     finally:
         conn.close()
