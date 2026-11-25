@@ -184,11 +184,10 @@ and the containment layer are judged by separate scenarios, so a passing
 run says exactly what held.
 
 0. `selftest`: the guard assertion (`guard_enforced` in `test/lib.sh`) is
-   fed synthetic event dumps and must reject a stale kill on another
-   worker, a `kill_failed`, a `recorded`-only event and a wrong-reason
-   event, and accept only a genuine `killed` record on the worker that
-   handled the case. This runs on parsing alone, so it guards the
-   assertion the guard scenarios depend on.
+   fed synthetic event dumps and must reject a stale kill from an earlier
+   case, a `kill_failed`, a `recorded`-only event and a wrong-reason
+   event, and accept only a new `killed` record. This runs on parsing
+   alone, so it guards the assertion the guard scenarios depend on.
 1. `baseline`: no shield. A SIMULATED post-exploit step, served by
    nginx's embedded Perl, makes a real 1.31.8 worker run `/bin/sh`,
    connect out and drop a `.html` and a `.txt` file; all of it works.
@@ -200,11 +199,11 @@ run says exactly what held.
    with no guard hit and no worker killed.
 5. `h2guard`: each form of the over-limit pattern, sent to fixed 1.31.9,
    is cut before nginx answers, and the guard is then proven to have
-   enforced it: a fresh `action=killed` event with reason
-   `conn_window_over_max` on the very worker that handled the case
-   (matched by pid), nginx's own log showing that worker exited on
-   SIGKILL, the master still alive with a replacement worker, a fresh
-   HTTP/2 200, and no crash signal. The legal 2^31-1 window and ordinary
+   enforced it: a new `action=killed` event with reason
+   `conn_window_over_max` (a pid with no kill before the case), that
+   instance's own error log showing the same worker exited on SIGKILL,
+   the worker gone, the master still alive and serving a fresh HTTP/2
+   200, and no crash signal. The legal 2^31-1 window and ordinary
    traffic are negative controls: served, no hit, no kill.
 6. `intercept`: the same two forms aimed at vulnerable 1.31.8 with the
    shield loaded, judged by the same enforcement proof. The worker is

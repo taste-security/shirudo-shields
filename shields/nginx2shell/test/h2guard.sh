@@ -51,7 +51,7 @@ events "$H2GUARD" "$H2GUARD_EVENTS" "$W/ctrl"
 check "h2guard control: the legal maximum is no new guard hit ($(hits "$W/gb") -> $(hits "$W/ctrl"))" \
 	[ "$(hits "$W/ctrl")" = "$(hits "$W/gb")" ]
 check "h2guard control: no worker was killed by the legal maximum" \
-	[ "$(workers patched | tr '\n' ,)" = "$(printf '%s' "$GB_WORKERS" | tr '\n' ,)" ]
+	[ -z "$(find_new_kill "$W/ctrl" conn_window_over_max "$GB_KILLED")" ]
 
 # Full map dump for the artifact.
 {

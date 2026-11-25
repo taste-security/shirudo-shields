@@ -222,23 +222,34 @@ instance_url()
 	esac
 }
 
-# worker_exited_on <pid> <signal>: nginx logged that worker <pid> exited on
-# the given signal. The guard's own stop is signal 9 (SIGKILL).
+# worker_exited_on <pid> <signal> <instance>: the instance's own error log
+# says its worker <pid> exited on that signal. Each instance logs to its own
+# file, so a match also proves the worker belonged to that instance. The
+# guard's stop is signal 9 (SIGKILL).
 worker_exited_on()
 {
-	cat "$N2S_ROOT"/var/log/nginx/n2s-*.error.log 2>/dev/null |
-		grep -qE "worker process $1 exited on signal $2"
+	grep -qE "worker process $1 exited on signal $2" \
+		"$N2S_ROOT/var/log/nginx/n2s-$3.error.log" 2>/dev/null
 }
 
-# find_fresh_kill <events-file> <reason> <workers>: the pid of a record that
-# is action=killed, has the given reason, and whose pid is one of <workers>
-# (the instance's worker pids, newline or space separated). Prints nothing
-# when none matches, so a stale kill on another pid, an action=recorded or
-# an action=kill_failed does not count as enforcement. Used by the guard
-# assertion and exercised directly by the selftest scenario.
-find_fresh_kill()
+# killed_pids <events-file>: the pids of every action=killed record.
+killed_pids()
 {
-	awk -v reason="$2" -v workers=" $(printf '%s' "$3" | tr '\n' ' ') " '
+	awk '/^  / && / action=killed / {
+		for (i = 1; i <= NF; i++) if ($i ~ /^pid=/) print substr($i, 5)
+	}' "$1"
+}
+
+# find_new_kill <events-file> <reason> <earlier-kills>: the pid of an
+# action=killed record with the given reason whose pid is not among
+# <earlier-kills> (the pids killed before this case, newline or space
+# separated). Prints nothing when none matches, so a stale kill from an
+# earlier case, an action=recorded, an action=kill_failed or a wrong reason
+# does not count as enforcement. Used by guard_enforced and exercised
+# directly by the selftest scenario.
+find_new_kill()
+{
+	awk -v reason="$2" -v earlier=" $(printf '%s' "$3" | tr '\n' ' ') " '
 		/^  / {
 			a = ""; r = ""; p = "";
 			for (i = 1; i <= NF; i++) {
@@ -247,7 +258,7 @@ find_fresh_kill()
 				else if ($i ~ /^pid=/) p = substr($i, 5);
 			}
 			if (a == "killed" && r == reason && p != "" &&
-				index(workers, " " p " ") > 0) { print p; exit }
+				index(earlier, " " p " ") == 0) { print p; exit }
 		}' "$1"
 }
 
@@ -257,18 +268,18 @@ guard_before()
 {
 	GB_INSTANCE=$1
 	GB_MASTER=$(master "$1")
-	GB_WORKERS=$(workers "$1")
 	GB_CRASH=$(crash_lines)
 	events "$H2GUARD" "$H2GUARD_EVENTS" "$W/gb"
 	GB_HITS=$(hits "$W/gb")
+	GB_KILLED=$(killed_pids "$W/gb")
 }
 
 # guard_enforced <reason> <label>: after a probe that should have been cut,
-# prove the guard killed the specific worker that handled it. Requires a new
-# hit, a fresh killed record with that reason on one of the instance's
-# workers (guard_before captured them), nginx's own log showing that worker
-# exited on SIGKILL, that worker now gone, the master still alive with a
-# replacement worker, a fresh HTTP/2 200, and no crash signal in the window.
+# prove the guard killed the worker that handled it. Requires a new hit, a
+# new action=killed record with that reason (a pid with no kill record
+# before the case), the instance's own error log showing that worker exited
+# on SIGKILL, that worker now gone, the master still alive with a worker
+# running, a fresh HTTP/2 200, and no crash signal in the window.
 guard_enforced()
 {
 	reason=$1
@@ -281,19 +292,19 @@ guard_enforced()
 		fail "$label: no new guard hit (${GB_HITS:-0} -> ${now_hits:-0})"
 		return
 	fi
-	pid=$(find_fresh_kill "$W/ga" "$reason" "$GB_WORKERS")
+	pid=$(find_new_kill "$W/ga" "$reason" "$GB_KILLED")
 	if [ -z "$pid" ]; then
 		sed 's/^/      | /' "$W/ga"
-		fail "$label: no action=killed event with reason=$reason on a $inst worker"
+		fail "$label: no new action=killed event with reason=$reason"
 		return
 	fi
-	pass "$label: the guard killed the worker that handled it (pid $pid, reason=$reason, action=killed)"
+	pass "$label: a new kill event for this case (pid $pid, reason=$reason, action=killed)"
 	ok=0
 	for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-		if worker_exited_on "$pid" 9; then ok=1; break; fi
+		if worker_exited_on "$pid" 9 "$inst"; then ok=1; break; fi
 		sleep 0.3
 	done
-	check "$label: nginx logged worker $pid exited on SIGKILL (signal 9)" [ "$ok" = 1 ]
+	check "$label: the $inst error log shows its worker $pid exited on SIGKILL (signal 9)" [ "$ok" = 1 ]
 	check "$label: no worker crashed in this case ($(crash_lines) crash signals total)" \
 		[ "$(crash_lines)" = "${GB_CRASH:-0}" ]
 	case " $(workers "$inst" | tr '\n' ' ') " in
