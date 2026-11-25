@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: BSD-2-Clause
+"""h2probe: the RFC 9113 section 6.9.1 flow-control conformance check.
+
+A sender must never let a flow-control window exceed 2^31-1; a server
+that receives a WINDOW_UPDATE pushing its send window past that limit
+answers with GOAWAY(FLOW_CONTROL_ERROR). This is the check conformance
+suites such as h2spec run. h2probe sends it in two forms, each on a
+connection of its own, once the server's SETTINGS came:
+
+  direct           two WINDOW_UPDATE(stream 0, 2^31-1)
+  rst-then-credit  HEADERS GET <path>, RST_STREAM(CANCEL) of that stream,
+                   then two WINDOW_UPDATE(stream 0, 2^31-1)
+
+Two increments, as h2spec sends: the second is over the limit whatever
+the window was, which matters after a cancel, when the server may have
+spent its window on DATA for the cancelled stream first. For each form
+h2probe reports what came back after the pattern:
+
+  RESULT answered GOAWAY error=FLOW_CONTROL_ERROR ...  nginx answered
+  RESULT cut <how>        the connection ended before any answer
+  RESULT silent           nothing within the timeout
+
+It is a conformance probe, not an exploit: two frames, no loop. Fixed
+nginx answers it with GOAWAY; that is the point. Still, the pattern is
+the input CVE-2026-123007 needs, so h2probe refuses to send it unless
+the server's own Server header names nginx 1.31.9 or later, or
+--i-know-target-is-patched is given. Never point it at a vulnerable
+nginx.
+
+Exit status: 0 when every pattern gave the --expect outcome (or no
+--expect), 1 when one did not, 2 on a usage error, 3 when it refused.
+"""
+
+import argparse
+import os
+import re
+import socket
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import h2frames as h2  # noqa: E402
+
+MIN_PATCHED = (1, 31, 9)
+
+
+def gate(host, port, args):
+    try:
+        server = h2.server_header(host, port, args.timeout, args.cafile)
+    except OSError as e:
+        print("h2probe: cannot read the Server header: %s" % e)
+        server = None
+    print("SERVER %s" % (server or "(none)"))
+    if args.i_know_target_is_patched:
+        print("GATE overridden by --i-know-target-is-patched")
+        return True
+    m = re.match(r"^nginx/(\d+)\.(\d+)\.(\d+)", server or "")
+    if not m:
+        print("REFUSED: the Server header does not name an nginx version; "
+              "h2probe sends its pattern only to nginx 1.31.9 or later")
+        return False
+    version = tuple(int(x) for x in m.groups())
+    if version < MIN_PATCHED:
+        print("REFUSED: nginx/%s is not 1.31.9 or later; the over-limit "
+              "pattern is never sent to a vulnerable nginx" % ".".join(m.groups()))
+        return False
+    print("GATE nginx/%s is 1.31.9 or later" % ".".join(m.groups()))
+    return True
+
+
+def probe(host, port, pattern, args):
+    conn = h2.Connection(host, port, args.timeout, args.cafile)
+    try:
+        conn.start(timeout=args.timeout)
+        over = h2.window_update(0, h2.MAX_WINDOW) * 2
+        if pattern == "direct":
+            out = over
+        else:
+            out = (h2.headers(1, h2.request_headers(conn.authority, args.path))
+                   + h2.rst_stream(1, h2.CANCEL) + over)
+        conn.send(out)
+        print("SENT %s" % pattern)
+        seen = []
+        while True:
+            try:
+                ftype, flags, stream, payload = conn.read_frame(args.timeout)
+            except socket.timeout:
+                return "silent", seen
+            except h2.Closed as e:
+                return "cut %s" % e, seen
+            seen.append(h2.describe(ftype, flags, stream, payload))
+            print("  frame %s" % seen[-1])
+            if ftype == h2.PING and not flags & h2.FLAG_ACK:
+                conn.send(h2.ping_ack(payload))
+            if ftype == h2.GOAWAY:
+                return "answered GOAWAY error=%s" % h2.goaway_error(payload), seen
+    finally:
+        conn.close()
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n\n")[0],
+        epilog="Sends the pattern only to nginx 1.31.9 or later.")
+    ap.add_argument("url", help="https://host:port of a FIXED nginx")
+    ap.add_argument("--pattern", choices=("direct", "rst-then-credit", "both"),
+                    default="both")
+    ap.add_argument("--path", default="/big.bin",
+                    help="what rst-then-credit requests and cancels")
+    ap.add_argument("--expect", choices=("answered", "cut"),
+                    help="exit 1 unless every pattern gave this outcome")
+    ap.add_argument("--timeout", type=float, default=5.0)
+    ap.add_argument("--cafile", help="verify the server with this CA")
+    ap.add_argument("--i-know-target-is-patched", action="store_true",
+                    help="skip the Server header check (a fixed server "
+                         "that hides its version)")
+    args = ap.parse_args()
+    try:
+        host, port = h2.parse_target(args.url)
+    except ValueError as e:
+        ap.error(str(e))
+
+    if not gate(host, port, args):
+        return 3
+    patterns = ("direct", "rst-then-credit") if args.pattern == "both" else (args.pattern,)
+    ok = True
+    for pattern in patterns:
+        try:
+            outcome, _ = probe(host, port, pattern, args)
+        except h2.Closed as e:
+            outcome = "error closed before the pattern was sent: %s" % e
+        except (OSError, RuntimeError) as e:
+            outcome = "error %s" % e
+        print("PATTERN %s RESULT %s" % (pattern, outcome))
+        if args.expect and not outcome.startswith(args.expect + " "):
+            ok = False
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

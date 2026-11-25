@@ -1,0 +1,29 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# usage: record <out.cast> <title> <command>
+#
+# Runs <command> (one shell string) in a pseudo-terminal of 120x40 under
+# util-linux `script`, which every Linux runner has, shows its output as
+# it runs, and writes the session to <out.cast> as an asciinema v2
+# recording (play it with `asciinema play`, or upload it to an asciinema
+# server or player). Exits with the command's status. Needs util-linux
+# 2.35 or later for --log-out and --log-timing, and python3.
+
+set -eu
+
+[ $# -eq 3 ] || { echo "usage: $0 <out.cast> <title> <command>" >&2; exit 2; }
+here=$(cd "$(dirname "$0")" && pwd)
+out=$1
+title=$2
+cmd=$3
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+status=0
+script -q -e --log-out "$tmp/typescript" --log-timing "$tmp/timing" \
+	-c "stty cols 120 rows 40 2>/dev/null; $cmd" || status=$?
+python3 "$here/script2cast.py" --title "$title" \
+	"$tmp/typescript" "$tmp/timing" "$out"
+echo "record: $out ($(wc -l <"$out") events, command status $status)" >&2
+exit "$status"

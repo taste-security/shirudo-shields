@@ -1,0 +1,266 @@
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Proves one shield on a real Shirudo target. Reusable: each shield's
+# workflow calls it with the shield's directory name. It builds Shirudo at
+# the pinned commit and its test VM the way Shirudo's own CI does (its
+# scripts, run from the Shirudo checkout), builds the shield into a .bee
+# signed with the key pair the VM bundle generates and the VM enrolls,
+# boots the target, runs the shield's scenarios on it under a terminal
+# recorder, and fails on any FAIL.
+#
+# A shield provides, under shields/<shield>/:
+#   Beefile and sources        the package (tools/ci/build-shield.sh)
+#   demo/build.sh <archive>    optional: a file system for the target
+#   test/operator-hook.sh      optional: before|after the package build
+#   test/prepare.sh <stage>    optional: on the target, before the run
+#   test/run-all.sh --narrate  the scenarios, PASS:/FAIL: lines
+
+name: Shield on the Shirudo test VM
+
+on:
+  workflow_call:
+    inputs:
+      shield:
+        description: Directory name under shields/
+        required: true
+        type: string
+      scenarios:
+        description: The scenarios run-all.sh runs, in order
+        required: true
+        type: string
+      title:
+        description: Title of the recording
+        required: false
+        type: string
+        default: ''
+      version:
+        description: SemVer the package is built with
+        required: false
+        type: string
+        default: 1.0.0
+
+permissions:
+  contents: read
+
+env:
+  # Shirudo, pinned. Bump both together, after reading what changed in
+  # its testing/ and .github/scripts/.
+  SHIRUDO_REPOSITORY: shirudo-dev/shirudo
+  SHIRUDO_SHA: 9e6bde6749a96526a9cc028b72ba3ce1b21f4f5c
+  SHIRUDO_DIR: _shirudo
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  target:
+    name: ${{ inputs.shield }} on a Shirudo target
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      VM: '1'
+      SHIELD: ${{ inputs.shield }}
+      SCENARIOS: ${{ inputs.scenarios }}
+      VERSION: ${{ inputs.version }}
+      TITLE: ${{ inputs.title || inputs.shield }}
+      VM_NAME: shield-${{ inputs.shield }}
+      # Under the Shirudo checkout, which the VM reads at /mnt/shirudo-src.
+      STAGE: ${{ github.workspace }}/_shirudo/build/shields/${{ inputs.shield }}
+      GUEST_STAGE: /mnt/shirudo-src/build/shields/${{ inputs.shield }}
+      OUT: ${{ github.workspace }}/out
+
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out Shirudo at the pinned commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.SHIRUDO_REPOSITORY }}
+          ref: ${{ env.SHIRUDO_SHA }}
+          path: _shirudo
+          persist-credentials: false
+
+      - name: Download the test kernel Shirudo pins
+        working-directory: _shirudo
+        env:
+          TEST_VM_ARCH: x86_64
+        run: testing/vm/kernel-artifact.sh download
+
+      # The caches of Shirudo's CI suite, keyed on the same inputs.
+      - name: Restore the static target dependencies
+        id: target-deps
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: _shirudo/build/target-deps
+          key: shirudo-target-deps-${{ hashFiles('_shirudo/Makefile.target-deps') }}
+
+      - name: Restore the host OpenSSL toolchain
+        id: host-openssl
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: _shirudo/build/host-openssl
+          key: shirudo-host-openssl-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('_shirudo/.github/scripts/vm-toolchain.sh') }}
+
+      - name: Restore the host libtpms toolchain
+        id: host-libtpms
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: _shirudo/build/host-libtpms
+          key: shirudo-host-libtpms-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('_shirudo/.github/scripts/vm-toolchain.sh', '_shirudo/.github/scripts/install-libtpms.sh') }}
+
+      - name: Restore the VM runtime image
+        id: images
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: _shirudo/build/test-vm/cache
+          key: shirudo-test-vm-runtime-${{ hashFiles('_shirudo/testing/vm/runtime-packages', '_shirudo/testing/vm/prepare-runtime.sh', '_shirudo/testing/vm/build-bundle.sh', '_shirudo/testing/vm/arch.sh', '_shirudo/.github/scripts/install-clang.sh', '_shirudo/.github/scripts/install-static-libcrypto-deps.sh', '_shirudo/testing/container/Containerfile', '_shirudo/testing/container/packages', '_shirudo/Makefile.target-deps') }}
+
+      - name: Make the runner a Shirudo VM host (Shirudo's tests.sh setup)
+        working-directory: _shirudo
+        env:
+          KERNEL_CI_ARTIFACT_DIR: ${{ github.workspace }}/_shirudo/build/kernel-ci-artifact
+        run: .github/scripts/tests.sh setup
+
+      - name: Build the demo's file system for the target
+        if: hashFiles(format('shields/{0}/demo/build.sh', inputs.shield)) != ''
+        run: |
+          mkdir -p "$STAGE"
+          sh "shields/$SHIELD/demo/build.sh" "$STAGE/rootfs.tar"
+
+      - name: Build Shirudo and the test VM bundle
+        run: sh tools/ci/shirudo.sh build
+
+      - name: Build the shield package
+        run: sh tools/ci/build-shield.sh "$SHIELD" "$VERSION" "$STAGE"
+
+      - name: Stage this repository for the target
+        run: |
+          mkdir -p "$STAGE/repo"
+          tar --exclude=./_shirudo --exclude=./.git --exclude=./out -cf - . |
+            tar -xf - -C "$STAGE/repo"
+
+      - name: Boot the target
+        timeout-minutes: 30
+        run: sh tools/ci/shirudo.sh boot "$VM_NAME"
+
+      - name: Prepare the target
+        if: hashFiles(format('shields/{0}/test/prepare.sh', inputs.shield)) != ''
+        timeout-minutes: 10
+        run: sh tools/ci/shirudo.sh ssh "$VM_NAME" "sh $GUEST_STAGE/repo/shields/$SHIELD/test/prepare.sh $GUEST_STAGE"
+
+      - name: Run the scenarios, recorded
+        id: scenarios
+        timeout-minutes: 30
+        run: |
+          mkdir -p "$OUT"
+          guest="SHIELD_PKG_DIR=$GUEST_STAGE/shield SHIELD_OUT=/mnt/shirudo-out/$SHIELD"
+          guest="$guest sh $GUEST_STAGE/repo/shields/$SHIELD/test/run-all.sh --narrate $SCENARIOS"
+          sh tools/cast/record "$OUT/$SHIELD-demo.cast" "$TITLE" \
+            "sh tools/ci/shirudo.sh ssh $VM_NAME '$guest'" 2>&1 | tee "$OUT/scenarios.log"
+
+      - name: Collect the target's state
+        if: always() && steps.scenarios.outcome != 'skipped'
+        continue-on-error: true
+        run: |
+          mkdir -p "$OUT"
+          sh tools/ci/shirudo.sh ssh "$VM_NAME" \
+            'shirudo-runtime status; shirudo-runtime upatch list; shirudo-runtime upatch map; journalctl -b --no-pager -n 300' \
+            >"$OUT/target-state.txt" 2>&1
+
+      - name: Stop the target
+        if: always()
+        continue-on-error: true
+        run: sh tools/ci/shirudo.sh stop "$VM_NAME"
+
+      - name: Gather the logs
+        if: always()
+        run: |
+          mkdir -p "$OUT"
+          vm=_shirudo/build/test-vm/vms/$VM_NAME
+          sudo cp -a "$vm/result" "$OUT/vm-result" 2>/dev/null || :
+          sudo cp "$vm/console.log" "$vm/qemu.log" "$OUT/" 2>/dev/null || :
+          cp "$STAGE"/*.bee "$STAGE"/bpm-*.log "$STAGE"/bpm-*.txt "$OUT/" 2>/dev/null || :
+          if [ -f "$OUT/vm-result/$SHIELD/upatch-map.txt" ]; then
+            cp "$OUT/vm-result/$SHIELD/upatch-map.txt" "$OUT/upatch-map.txt"
+          fi
+          # The runs as root leave root's files; the cache and upload
+          # steps read them as the runner.
+          sudo chown -R "$(id -u):$(id -g)" "$OUT" "$SHIRUDO_DIR"
+
+      - name: Write the job summary
+        if: always() && steps.scenarios.outcome != 'skipped'
+        run: |
+          read -ra scenarios <<<"$SCENARIOS"
+          python3 tools/ci/summary.py "$SHIELD" "$OUT/scenarios.log" "${scenarios[@]}" \
+            >"$OUT/summary.md" || status=$?
+          cat "$OUT/summary.md" >>"$GITHUB_STEP_SUMMARY"
+          {
+            echo "Artifacts: \`$SHIELD-logs\` (scenario log, \`upatch map\` output, package, guest logs),"
+            echo "\`$SHIELD-demo-cast\` (asciinema v2 recording of the run; \`asciinema play $SHIELD-demo.cast\`)."
+          } >>"$GITHUB_STEP_SUMMARY"
+          exit "${status:-0}"
+
+      - name: Upload the logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.shield }}-logs
+          path: |
+            out/
+            !out/*.cast
+          if-no-files-found: ignore
+
+      - name: Upload the recording
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.shield }}-demo-cast
+          path: out/*.cast
+          if-no-files-found: warn
+
+      # Save each expensive build once it is complete, even when a later
+      # step failed, as Shirudo's CI does.
+      - name: Check what can be cached
+        id: cacheable
+        if: always()
+        run: |
+          b=_shirudo/build
+          ok() { [ -s "$1" ] && echo true || echo false; }
+          {
+            echo "target-deps=$( [ -s $b/target-deps/lib/libcrypto.a ] && [ -s $b/target-deps/curl/lib/libcurl.a ] && echo true || echo false)"
+            echo "host-openssl=$(ok $b/host-openssl/.shirudo-openssl-built)"
+            echo "host-libtpms=$(ok $b/host-libtpms/lib/libtpms.so)"
+            echo "images=$(ls $b/test-vm/cache/runtime/*.qcow2 >/dev/null 2>&1 && echo true || echo false)"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Save the static target dependencies
+        if: always() && steps.target-deps.outputs.cache-hit != 'true' && steps.cacheable.outputs.target-deps == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: _shirudo/build/target-deps
+          key: ${{ steps.target-deps.outputs.cache-primary-key }}
+
+      - name: Save the host OpenSSL toolchain
+        if: always() && steps.host-openssl.outputs.cache-hit != 'true' && steps.cacheable.outputs.host-openssl == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: _shirudo/build/host-openssl
+          key: ${{ steps.host-openssl.outputs.cache-primary-key }}
+
+      - name: Save the host libtpms toolchain
+        if: always() && steps.host-libtpms.outputs.cache-hit != 'true' && steps.cacheable.outputs.host-libtpms == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: _shirudo/build/host-libtpms
+          key: ${{ steps.host-libtpms.outputs.cache-primary-key }}
+
+      - name: Save the VM runtime image
+        if: always() && steps.images.outputs.cache-hit != 'true' && steps.cacheable.outputs.images == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: _shirudo/build/test-vm/cache
+          key: ${{ steps.images.outputs.cache-primary-key }}

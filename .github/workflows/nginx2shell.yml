@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# The nginx2shell shield (CVE-2026-123007) on a Shirudo target: scenarios
+# in the order of CONTRACT.md, the run recorded as nginx2shell-demo-cast.
+
+name: nginx2shell
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - shields/nginx2shell/**
+      - tools/**
+      - .github/workflows/nginx2shell.yml
+      - .github/workflows/shield-ci.yml
+  pull_request:
+    paths:
+      - shields/nginx2shell/**
+      - tools/**
+      - .github/workflows/nginx2shell.yml
+      - .github/workflows/shield-ci.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  nginx2shell:
+    uses: ./.github/workflows/shield-ci.yml
+    with:
+      shield: nginx2shell
+      scenarios: baseline load contain legit h2guard unload
+      title: nginx2shell · Shirudo shield for CVE-2026-123007

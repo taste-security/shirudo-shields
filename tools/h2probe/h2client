@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: BSD-2-Clause
+"""h2client: ordinary HTTP/2 traffic, the kind a browser sends.
+
+On one TLS connection it opens --requests streams for --path and one for
+--big at once, reading them interleaved, then --cancels times starts a
+download of --big, cancels it the way a browser does when the user
+navigates away (RST_STREAM CANCEL after some DATA), and fetches --path
+again on the same connection. It returns flow-control credit exactly for
+the bytes it received, the connection window included for data that
+arrives on a stream it already cancelled, so its windows never grow past
+their initial size: the opposite of h2probe's pattern, and safe against
+any nginx.
+
+Prints one line per stream and a last line RESULT ok or RESULT fail;
+exits 0 when every stream that was not cancelled ended with status 200
+and the big download had --big-size bytes.
+"""
+
+import argparse
+import os
+import socket
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import h2frames as h2  # noqa: E402
+
+CREDIT_AT = 16384
+
+
+class Client:
+    def __init__(self, conn, timeout):
+        self.conn = conn
+        self.timeout = timeout
+        self.next_id = 1
+        self.streams = {}
+        self.conn_unacked = 0
+
+    def open(self, path):
+        sid = self.next_id
+        self.next_id += 2
+        self.streams[sid] = {"path": path, "status": None, "bytes": 0,
+                             "unacked": 0, "done": False, "cancelled": False}
+        self.conn.send(h2.headers(sid, h2.request_headers(self.conn.authority, path)))
+        return sid
+
+    def cancel(self, sid):
+        st = self.streams[sid]
+        if not st["done"]:
+            st["cancelled"] = True
+            st["done"] = True
+            self.conn.send(h2.rst_stream(sid, h2.CANCEL))
+
+    def step(self):
+        ftype, flags, sid, payload = self.conn.read_frame(self.timeout)
+        st = self.streams.get(sid)
+        if ftype == h2.SETTINGS and not flags & h2.FLAG_ACK:
+            self.conn.send(h2.settings(ack=True))
+        elif ftype == h2.PING and not flags & h2.FLAG_ACK:
+            self.conn.send(h2.ping_ack(payload))
+        elif ftype == h2.GOAWAY:
+            raise h2.Closed("GOAWAY error=%s" % h2.goaway_error(payload))
+        elif ftype == h2.HEADERS and st:
+            block = payload
+            if flags & h2.FLAG_PADDED:
+                block = block[1:len(block) - payload[0]]
+            if flags & h2.FLAG_PRIORITY:
+                block = block[5:]
+            if st["status"] is None:
+                st["status"] = h2.response_status(block)
+            if flags & h2.FLAG_END_STREAM:
+                st["done"] = True
+        elif ftype == h2.RST_STREAM and st:
+            st["done"] = True
+            if not st["cancelled"]:
+                st["status"] = "reset"
+        elif ftype == h2.DATA:
+            # Every DATA frame counts against the connection window, on a
+            # cancelled stream too; credit back exactly what arrived.
+            self.conn_unacked += len(payload)
+            if self.conn_unacked >= CREDIT_AT:
+                self.conn.send(h2.window_update(0, self.conn_unacked))
+                self.conn_unacked = 0
+            if st and not st["cancelled"]:
+                data = payload
+                if flags & h2.FLAG_PADDED:
+                    data = data[1:len(data) - payload[0]]
+                st["bytes"] += len(data)
+                st["unacked"] += len(payload)
+                if flags & h2.FLAG_END_STREAM:
+                    st["done"] = True
+                elif st["unacked"] >= CREDIT_AT:
+                    self.conn.send(h2.window_update(sid, st["unacked"]))
+                    st["unacked"] = 0
+        return ftype, sid
+
+    def wait(self, sids):
+        while not all(self.streams[s]["done"] for s in sids):
+            self.step()
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("url", help="https://host:port")
+    ap.add_argument("--path", default="/")
+    ap.add_argument("--requests", type=int, default=20)
+    ap.add_argument("--big", default="/big.bin")
+    ap.add_argument("--big-size", type=int, default=None)
+    ap.add_argument("--cancels", type=int, default=5)
+    ap.add_argument("--cancel-after", type=int, default=32768,
+                    help="bytes of the big download read before a cancel")
+    ap.add_argument("--timeout", type=float, default=10.0)
+    ap.add_argument("--cafile")
+    args = ap.parse_args()
+    host, port = h2.parse_target(args.url)
+
+    problems = []
+    try:
+        conn = h2.Connection(host, port, args.timeout, args.cafile)
+        conn.start(timeout=args.timeout)
+        c = Client(conn, args.timeout)
+        first = [c.open(args.path) for _ in range(args.requests)]
+        big = c.open(args.big)
+        c.wait(first + [big])
+        for _ in range(args.cancels):
+            sid = c.open(args.big)
+            while c.streams[sid]["bytes"] < args.cancel_after and not c.streams[sid]["done"]:
+                c.step()
+            c.cancel(sid)
+            again = c.open(args.path)
+            c.wait([again])
+        # Let what was in flight on the cancelled streams drain.
+        c.timeout = 1.0
+        try:
+            while True:
+                c.step()
+        except socket.timeout:
+            pass
+        except h2.Closed as e:
+            # nginx closing an idle connection is fine; anything else is not.
+            if "GOAWAY error=NO_ERROR" not in str(e):
+                raise
+        conn.close()
+    except (h2.Closed, socket.timeout, OSError, RuntimeError) as e:
+        print("RESULT fail connection: %s" % (e or e.__class__.__name__))
+        return 1
+
+    completed = 0
+    for sid, st in sorted(c.streams.items()):
+        tag = "cancelled" if st["cancelled"] else "status=%s" % st["status"]
+        print("stream %d %s %s bytes=%d" % (sid, st["path"], tag, st["bytes"]))
+        if st["cancelled"]:
+            continue
+        completed += 1
+        if st["status"] != 200:
+            problems.append("stream %d status %s" % (sid, st["status"]))
+    if args.big_size is not None and c.streams[big]["bytes"] != args.big_size:
+        problems.append("big download %d bytes, not %d" % (c.streams[big]["bytes"], args.big_size))
+    if problems:
+        print("RESULT fail " + "; ".join(problems))
+        return 1
+    print("RESULT ok streams=%d cancels=%d" % (completed, args.cancels))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

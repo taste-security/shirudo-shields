@@ -1,0 +1,34 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# usage: n2s-run start | stop | foreground
+#
+# Starts or stops both nginx instances of the demo image: 1.31.8 on 8443
+# and 1.31.9 on 9443. start leaves both as daemons (the chroot on a
+# target); foreground keeps 1.31.9 in the foreground (docker run).
+
+set -eu
+
+VULN=/usr/sbin/nginx
+PATCHED=/usr/local/sbin/nginx
+VULN_CONF=/etc/nginx/n2s/vulnerable.conf
+PATCHED_CONF=/etc/nginx/n2s/patched.conf
+
+case ${1:-} in
+start)
+	"$VULN" -c "$VULN_CONF"
+	"$PATCHED" -c "$PATCHED_CONF"
+	;;
+stop)
+	"$VULN" -c "$VULN_CONF" -s quit 2>/dev/null || :
+	"$PATCHED" -c "$PATCHED_CONF" -s quit 2>/dev/null || :
+	;;
+foreground)
+	"$VULN" -c "$VULN_CONF"
+	exec "$PATCHED" -c "$PATCHED_CONF" -g 'daemon off;'
+	;;
+*)
+	echo "usage: $0 start | stop | foreground" >&2
+	exit 2
+	;;
+esac

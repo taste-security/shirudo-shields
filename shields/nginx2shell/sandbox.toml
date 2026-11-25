@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 Authors of shirudo
+#
+# The rules of the nginx sandbox the Beefile declares as a policy, in the
+# format of shirudo's app-sandbox. README.md describes the keys. Edit
+# `upstreams` to the networks your nginx proxies to, resolves names with
+# and fetches OCSP responses from, then rebuild or run
+# `shirudo bpm config update`.
+
+[networks]
+# Link-local (169.254.0.0/16, fe80::/10) is left out on purpose: it holds
+# the cloud instance metadata service.
+upstreams = [
+	"127.0.0.0/8",
+	"10.0.0.0/8",
+	"172.16.0.0/12",
+	"192.168.0.0/16",
+	"::1/128",
+	"fc00::/7",
+]
+
+[sandbox.nginx]
+exec = []
+network = ["@upstreams"]
+
+[sandbox.nginx.deny]
+create = ["*.conf", "*.html", "*.js", "*.so"]
+rename = ["*.conf", "*.html", "*.js", "*.so"]
+write = ["*.conf", "*.html", "*.js", "*.so"]

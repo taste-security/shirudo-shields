@@ -1,0 +1,5 @@
+_shirudo/
+*.bee
+*.upatch
+artifacts/
+__pycache__/

@@ -1,0 +1,40 @@
+[package]
+name = "nginx2shell-shield"
+description = "Shield nginx against Nginx2Shell (CVE-2026-123007): cut the HTTP/2 flow-control input the exploit needs, and contain a worker that is taken over anyway."
+license = "GPL-2.0 OR BSD-2-Clause"
+authors = ["Authors of shirudo-shields"]
+
+[[files]]
+source = "sandbox.toml"
+
+[[files]]
+source = "gen_policy.py"
+
+[[upatches]]
+source = "nginx2shell-contain.bpf.c"
+
+[[upatches.rodata]]
+symbol = "sandbox_policy"
+input = "sandbox.toml"
+generator = ["python3", "gen_policy.py"]
+update = ["python3", "gen_policy.py"]
+
+# sandbox.toml gives the rules of the tasks that execute one of these
+# paths. The bit is far from app-sandbox's 0x1 and 0x2, as every upatch
+# that reads policy bits shares shirudo's task policy map.
+[[upatches.policy]]
+id = "nginx"
+bit = 0x100
+paths = ["/usr/sbin/nginx", "/usr/local/nginx/sbin/nginx", "/usr/local/sbin/nginx"]
+
+# A tree id must be the upatch's own name, so each upatch has its entry.
+[upatches.tree]
+id = "nginx2shell-contain"
+fixes = ["CVE-2026-123007"]
+
+[[upatches]]
+source = "nginx2shell-h2guard.bpf.c"
+
+[upatches.tree]
+id = "nginx2shell-h2guard"
+fixes = ["CVE-2026-123007"]
