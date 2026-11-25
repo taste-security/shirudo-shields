@@ -77,6 +77,17 @@ and records why, and never guesses:
 A connection whose first bytes are not the HTTP/2 client preface, such
 as HTTP/1.1 over TLS, is not followed and not recorded.
 
+The connection table is not LRU, so an entry leaves it in one of three
+ways: nginx calls `SSL_free` when it closes the connection, the guard
+removes every entry of a worker it kills, and a `sched_process_exit`
+program removes every entry of an nginx process that exits any other way
+(killed from outside, crashed, out of memory), since such a worker frees
+none of its connections. Without that last path the table would fill
+over time and new connections would go `untracked_table_full`. The scan
+runs once per exiting nginx process and is bounded by the table's size;
+any other exiting process costs one name comparison. The `lifecycle`
+scenario checks it.
+
 ## How the sandbox works
 
 `nginx2shell-contain` is shirudo's `app-sandbox` upatch with a table of
@@ -217,7 +228,12 @@ run says exactly what held.
    master survives and a fresh worker serves; workers forked by an
    nginx reload stay contained and guarded; HTTP/1.1 and HTTP/2 work
    afterwards with no hit.
-8. `unload`: the SIMULATED step works again, so every refusal before
+8. `lifecycle`: eight idle HTTP/2 connections are held to fixed 1.31.9
+   and the guard tracks them; the instance's workers are then killed
+   from outside with SIGKILL, so none of them calls `SSL_free`, and the
+   connection table must drop back once they are gone, with nginx
+   serving again.
+9. `unload`: the SIMULATED step works again, so every refusal before
    was the shield's.
 
 No step runs an exploit. The over-limit pattern is the RFC 9113 section

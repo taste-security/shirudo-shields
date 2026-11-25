@@ -817,6 +817,27 @@ int BPF_UPROBE(h2guard_free, void *ssl)
 	return 0;
 }
 
+/*
+ * A worker that exits without the guard stopping it (killed from outside,
+ * crashed, out of memory) calls SSL_free on none of its connections, and
+ * h2_conns is not LRU: its entries would stay until the table is full and
+ * new connections go untracked. Purge them when the process is gone. Only
+ * the last thread of an nginx process pays for the scan, bounded by the
+ * table's size; an exiting process of any other name costs one comparison.
+ */
+SEC("tp_btf/sched_process_exit")
+int BPF_PROG(h2guard_exit, struct task_struct *p, bool group_dead)
+{
+	__u32 tgid;
+
+	(void)p;
+	if (!group_dead || !h2_comm_matches())
+		return 0;
+	tgid = bpf_get_current_pid_tgid() >> 32;
+	bpf_for_each_map_elem(&h2_conns, h2_purge_conn, &tgid, 0);
+	return 0;
+}
+
 /* Runs once right after attachment and allocates the table in the arena. */
 SEC("syscall")
 int shirudo_test__h2guard_init(void *ctx)
