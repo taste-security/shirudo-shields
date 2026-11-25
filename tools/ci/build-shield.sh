@@ -64,6 +64,15 @@ cp "$bee" "$stage/"
 cat "$stage/bpm-info.txt"
 rm -rf "$stage/shield"
 mkdir -p "$stage/shield"
-tar -xzf "$bee" -C "$stage/shield"
+# A .bee holds everything under one top-level <package>-<version>/ directory
+# (see Shirudo's t9109, which reads <name>-<version>/upatches/<name>.upatch).
+# Strip that prefix so the members land at $stage/shield/upatches/*.upatch,
+# where the scenario scripts (lib.sh: SHIELD_PKG_DIR/upatches) look for them.
+tar -xzf "$bee" --strip-components=1 -C "$stage/shield"
+[ -d "$stage/shield/upatches" ] || {
+	echo "no upatches/ in $(basename "$bee"); it holds:" >&2
+	tar -tzf "$bee" >&2
+	exit 1
+}
 ls -l "$stage/shield/upatches"
 echo "built $(basename "$bee") into $stage/shield"
