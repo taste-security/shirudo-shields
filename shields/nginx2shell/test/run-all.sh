@@ -6,7 +6,7 @@
 # Runs the nginx2shell scenarios on a Shirudo target, as root, in the
 # order: selftest (the guard assertion rejects weak evidence), baseline
 # (shield not loaded), load, contain, legit, h2guard, intercept,
-# regression, unload. Every scenario runs even when one before it
+# regression, lifecycle, unload. Every scenario runs even when one before it
 # failed, so that unload always runs. Prints one "SCENARIO <name> PASS"
 # or "FAIL" line each and exits 1 if any failed. --narrate prints a short
 # line before each scenario, for a recording; the demo is this run.
@@ -20,7 +20,7 @@ if [ "${1:-}" = --narrate ]; then
 	narrate=1
 	shift
 fi
-[ $# -gt 0 ] || set -- selftest baseline load contain legit h2guard intercept regression unload
+[ $# -gt 0 ] || set -- selftest baseline load contain legit h2guard intercept regression lifecycle unload
 
 N2S_OUT=${N2S_OUT:-${SHIELD_OUT:-/var/tmp/nginx2shell-test}}
 export N2S_OUT
@@ -46,7 +46,8 @@ title()
 	h2guard) echo "5 · The over-limit flow-control pattern, sent only to fixed nginx 1.31.9: the guard cuts it first" ;;
 	intercept) echo "6 · The same trigger aimed at vulnerable nginx 1.31.8, with the shield on: cut before nginx parses it, no crash" ;;
 	regression) echo "7 · Regression: the exact limit, a sustained attack, an nginx reload, then normal traffic" ;;
-	unload) echo "8 · Unload the shield: the SIMULATED shell runs again" ;;
+	lifecycle) echo "8 · Lifecycle: workers killed from outside leave no entries behind in the guard's table" ;;
+	unload) echo "9 · Unload the shield: the SIMULATED shell runs again" ;;
 	*) echo "$1" ;;
 	esac
 }

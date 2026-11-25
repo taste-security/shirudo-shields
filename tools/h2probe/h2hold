@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: BSD-2-Clause
+"""h2hold: hold ordinary HTTP/2 connections open.
+
+Opens --count connections over TLS, finishes the connection preface and
+SETTINGS exchange on each, prints "HELD <n>" and then keeps them open and
+idle until --seconds pass or it is killed. Nothing beyond what a browser
+does with an idle connection, so it gives the guard live connections to
+track in the lifecycle test.
+"""
+
+import argparse
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import h2frames as h2  # noqa: E402
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("url", help="https://host:port")
+    ap.add_argument("--count", type=int, default=8)
+    ap.add_argument("--seconds", type=float, default=60.0)
+    ap.add_argument("--timeout", type=float, default=5.0)
+    ap.add_argument("--cafile", help="verify the server with this CA")
+    args = ap.parse_args()
+    try:
+        host, port = h2.parse_target(args.url)
+    except ValueError as e:
+        ap.error(str(e))
+    conns = []
+    for _ in range(args.count):
+        conn = h2.Connection(host, port, args.timeout, args.cafile)
+        conn.start(timeout=args.timeout)
+        conns.append(conn)
+    print("HELD %d" % len(conns), flush=True)
+    try:
+        time.sleep(args.seconds)
+    finally:
+        for conn in conns:
+            conn.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
