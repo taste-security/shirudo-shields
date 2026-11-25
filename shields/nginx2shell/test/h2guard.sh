@@ -1,12 +1,13 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Scenario 4, h2guard: the shield is loaded. h2probe sends the RFC 9113
-# 6.9.1 over-limit flow-control pattern, in both forms, to FIXED nginx
-# 1.31.9 only: h2probe itself refuses any server whose Server header does
-# not name 1.31.9 or later. In baseline that nginx answered with GOAWAY;
-# now the guard cuts the connection before nginx answers, records the hit
-# in its map, and nginx's master starts a new worker.
+# Scenario 5, h2guard: the shield is loaded. For each form of the RFC 9113
+# 6.9.1 over-limit flow-control pattern, sent to FIXED nginx 1.31.9 (h2probe
+# refuses anything older), the guard must cut the connection before nginx
+# answers and then prove enforcement: a fresh action=killed event with the
+# right reason on the very worker that handled the case, nginx's own log
+# showing that worker exited on SIGKILL, the master still alive with a
+# replacement, a fresh 200, and no crash. Each form is one case.
 
 . "$(dirname "$0")/lib.sh"
 need curl python3
@@ -14,45 +15,45 @@ need curl python3
 case $N2S_PATCHED_URL in
 *:8443*) fail "N2S_PATCHED_URL points at the vulnerable instance"; finish ;;
 esac
-
-events "$H2GUARD" "$H2GUARD_EVENTS" "$W/before"
-killed=$(killed_lines)
-info "nginx 1.31.9 workers before: $(workers patched)"
-
-python3 "$H2PROBE" --expect cut "$N2S_PATCHED_URL" >"$W/probe" 2>&1
-status=$?
-grep -v '  frame DATA' "$W/probe" | sed 's/^/      | /'
-for pattern in direct rst-then-credit; do
-	if grep -q "^PATTERN $pattern RESULT cut " "$W/probe"; then
-		pass "$pattern: the connection was cut before nginx answered"
-	else
-		fail "$pattern: $(sed -n "s/^PATTERN $pattern RESULT //p" "$W/probe")"
-	fi
+for u in "$CONTAIN" "$H2GUARD"; do
+	loaded "$u" || { fail "$u is not loaded; h2guard runs under the shield"; finish; }
 done
-[ "$status" -ne 3 ] || fail "h2probe refused $N2S_PATCHED_URL: is it nginx 1.31.9?"
 
-events "$H2GUARD" "$H2GUARD_EVENTS" "$W/after"
-cp "$W/after" "$N2S_OUT/h2guard-events.txt"
-sed 's/^/      | /' "$W/after"
-before=$(hits "$W/before")
-after=$(hits "$W/after")
-if [ "${after:-0}" -gt "${before:-0}" ]; then
-	pass "the hits are in $H2GUARD's $H2GUARD_EVENTS map (${before:-0} -> $after)"
+for pattern in direct rst-then-credit; do
+	guard_before patched
+	python3 "$H2PROBE" --pattern "$pattern" --expect cut "$N2S_PATCHED_URL" >"$W/probe" 2>&1
+	pstatus=$?
+	grep -v '  frame DATA' "$W/probe" | sed 's/^/      | /'
+	if [ "$pstatus" -eq 3 ]; then
+		fail "h2guard $pattern: h2probe refused $N2S_PATCHED_URL: is it nginx 1.31.9?"
+		continue
+	fi
+	if grep -q "^PATTERN $pattern RESULT cut " "$W/probe"; then
+		pass "h2guard $pattern: the connection was cut before nginx answered"
+	else
+		fail "h2guard $pattern: not cut: $(sed -n "s/^PATTERN $pattern RESULT //p" "$W/probe")"
+		continue
+	fi
+	guard_enforced conn_window_over_max "h2guard $pattern"
+done
+
+# Negative controls, under the same loaded shield: the legal boundary and
+# ordinary HTTP/2 must NOT be a hit and must NOT kill a worker.
+guard_before patched
+python3 "$H2PROBE" --pattern at-limit --expect served "$N2S_PATCHED_URL" >"$W/legal" 2>&1
+grep -E "^(PATTERN|SERVER|GATE)" "$W/legal" | sed 's/^/      | /'
+if grep -q "^PATTERN at-limit RESULT served " "$W/legal"; then
+	pass "h2guard control: a window at exactly 2^31-1 is served, not cut"
 else
-	sed 's/^/      | /' "$W/after.err"
-	fail "no new hit in $H2GUARD's $H2GUARD_EVENTS map (${before:-0} -> ${after:-0})"
+	fail "h2guard control: the legal maximum was not served: $(sed -n 's/^PATTERN at-limit RESULT //p' "$W/legal")"
 fi
-if grep -q 'action=killed' "$W/after"; then
-	info "action: the worker was killed with SIGKILL"
-fi
-info "nginx: $(( $(killed_lines) - killed )) worker exit(s) on a signal; workers now $(workers patched)"
+events "$H2GUARD" "$H2GUARD_EVENTS" "$W/ctrl"
+check "h2guard control: the legal maximum is no new guard hit ($(hits "$W/gb") -> $(hits "$W/ctrl"))" \
+	[ "$(hits "$W/ctrl")" = "$(hits "$W/gb")" ]
+check "h2guard control: no worker was killed by the legal maximum" \
+	[ "$(workers patched | tr '\n' ,)" = "$(printf '%s' "$GB_WORKERS" | tr '\n' ,)" ]
 
-sleep 1
-status=$(https_status "$N2S_PATCHED_URL/")
-check "nginx 1.31.9 serves again after the cut ($status)" [ "$status" = "200 2" ]
-status=$(https_status "$N2S_VULN_URL/")
-check "nginx 1.31.8 was not touched ($status)" [ "$status" = "200 2" ]
-
+# Full map dump for the artifact.
 {
 	echo "# shirudo-runtime upatch map"
 	"$SHIRUDO_RUNTIME" upatch map 2>&1

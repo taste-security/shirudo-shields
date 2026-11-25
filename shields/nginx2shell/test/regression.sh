@@ -72,10 +72,13 @@ check "1: SETTINGS_INITIAL_WINDOW_SIZE at its legal maximum 2^31-1 is served" \
 h1=$(guard_hits)
 check "1: the legal maximum is no guard hit (${h0:-0} -> ${h1:-0})" [ "${h1:-0}" = "${h0:-0}" ]
 check "1: no 1.31.9 worker was killed at the limit" [ "$(workers patched)" = "$patched_workers" ]
+# One past the limit is cut, and the guard provably killed the worker that
+# handled it (same assertion h2guard uses): fresh action=killed with the
+# right reason on that worker, confirmed in nginx's log, with recovery.
+guard_before patched
 check "1: one past the limit is cut before nginx answers" probe one-over "cut "
+guard_enforced conn_window_over_max "1"
 h2=$(guard_hits)
-check "1: one past the limit is a guard hit (${h1:-0} -> ${h2:-0})" [ "${h2:-0}" -gt "${h1:-0}" ]
-check "1: nginx 1.31.9 serves again after the cut" serves_soon "$N2S_PATCHED_URL"
 
 # --- 2  a sustained attack ---------------------------------------------
 ROUNDS=5

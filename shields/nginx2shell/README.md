@@ -179,8 +179,16 @@ file name or the peer address and port, and the count.
 CI (`.github/workflows/nginx2shell.yml`) builds this package, boots
 Shirudo's test VM and runs nginx 1.31.8 (vulnerable range) and 1.31.9
 (fixed) on it, both with HTTP/2, TLS and embedded Perl. The scenarios in
-`test/` run in order and fail the job on any check that fails:
+`test/` run in order and fail the job on any check that fails. The guard
+and the containment layer are judged by separate scenarios, so a passing
+run says exactly what held.
 
+0. `selftest`: the guard assertion (`guard_enforced` in `test/lib.sh`) is
+   fed synthetic event dumps and must reject a stale kill on another
+   worker, a `kill_failed`, a `recorded`-only event and a wrong-reason
+   event, and accept only a genuine `killed` record on the worker that
+   handled the case. This runs on parsing alone, so it guards the
+   assertion the guard scenarios depend on.
 1. `baseline`: no shield. A SIMULATED post-exploit step, served by
    nginx's embedded Perl, makes a real 1.31.8 worker run `/bin/sh`,
    connect out and drop a `.html` and a `.txt` file; all of it works.
@@ -190,19 +198,35 @@ Shirudo's test VM and runs nginx 1.31.8 (vulnerable range) and 1.31.9
 4. `legit`: ordinary HTTP/2 (parallel requests, an 8 MiB download,
    interleaved streams cancelled with data in flight) is all served,
    with no guard hit and no worker killed.
-5. `h2guard`: the over-limit flow-control pattern, sent to fixed 1.31.9
-   only, is cut before nginx answers.
-6. `regression`: the edges a change could break unnoticed. A window at
-   exactly 2^31-1 is served and one past it is cut; five attacks in a
-   row are each cut while the master survives and a fresh worker
-   serves; workers forked by an nginx reload stay contained and
-   guarded; HTTP/1.1 and HTTP/2 work afterwards with no hit.
-7. `unload`: the SIMULATED step works again, so every refusal before
+5. `h2guard`: each form of the over-limit pattern, sent to fixed 1.31.9,
+   is cut before nginx answers, and the guard is then proven to have
+   enforced it: a fresh `action=killed` event with reason
+   `conn_window_over_max` on the very worker that handled the case
+   (matched by pid), nginx's own log showing that worker exited on
+   SIGKILL, the master still alive with a replacement worker, a fresh
+   HTTP/2 200, and no crash signal. The legal 2^31-1 window and ordinary
+   traffic are negative controls: served, no hit, no kill.
+6. `intercept`: the same two forms aimed at vulnerable 1.31.8 with the
+   shield loaded, judged by the same enforcement proof. The worker is
+   killed at `SSL_read` before nginx's flow-control code reads the
+   frame, so no worker exits on a crash signal: the bug never runs.
+   The trigger reaches the vulnerable instance only once the shield is
+   confirmed loaded.
+7. `regression`: the edges a change could break unnoticed. A window at
+   exactly 2^31-1 is served and one past it is cut, with the same
+   enforcement proof; five attacks in a row are each cut while the
+   master survives and a fresh worker serves; workers forked by an
+   nginx reload stay contained and guarded; HTTP/1.1 and HTTP/2 work
+   afterwards with no hit.
+8. `unload`: the SIMULATED step works again, so every refusal before
    was the shield's.
 
 No step runs an exploit. The over-limit pattern is the RFC 9113 section
-6.9.1 conformance input, and `tools/h2probe` sends it only to a server
-whose `Server` header names nginx 1.31.9 or later.
+6.9.1 conformance input. `tools/h2probe` sends it to fixed nginx by
+default (it refuses a `Server` header older than 1.31.9); the `intercept`
+scenario passes `--behind-shield`, which allows a vulnerable target but
+forces the only acceptable outcome to be the connection cut, and the
+scenario sends it only after confirming the shield is loaded.
 
 ## Limits
 

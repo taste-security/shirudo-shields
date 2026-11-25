@@ -208,3 +208,104 @@ https_status()
 {
 	curl -sk --http2 --max-time 20 -o /dev/null -w '%{http_code} %{http_version}' "$1"
 }
+
+master()
+{
+	sh "$N2S_DEMO" master "$1"
+}
+
+instance_url()
+{
+	case $1 in
+	vulnerable) echo "$N2S_VULN_URL" ;;
+	patched) echo "$N2S_PATCHED_URL" ;;
+	esac
+}
+
+# worker_exited_on <pid> <signal>: nginx logged that worker <pid> exited on
+# the given signal. The guard's own stop is signal 9 (SIGKILL).
+worker_exited_on()
+{
+	cat "$N2S_ROOT"/var/log/nginx/n2s-*.error.log 2>/dev/null |
+		grep -qE "worker process $1 exited on signal $2"
+}
+
+# find_fresh_kill <events-file> <reason> <workers>: the pid of a record that
+# is action=killed, has the given reason, and whose pid is one of <workers>
+# (the instance's worker pids, newline or space separated). Prints nothing
+# when none matches, so a stale kill on another pid, an action=recorded or
+# an action=kill_failed does not count as enforcement. Used by the guard
+# assertion and exercised directly by the selftest scenario.
+find_fresh_kill()
+{
+	awk -v reason="$2" -v workers=" $(printf '%s' "$3" | tr '\n' ' ') " '
+		/^  / {
+			a = ""; r = ""; p = "";
+			for (i = 1; i <= NF; i++) {
+				if ($i ~ /^action=/) a = substr($i, 8);
+				else if ($i ~ /^reason=/) r = substr($i, 8);
+				else if ($i ~ /^pid=/) p = substr($i, 5);
+			}
+			if (a == "killed" && r == reason && p != "" &&
+				index(workers, " " p " ") > 0) { print p; exit }
+		}' "$1"
+}
+
+# guard_before <instance>: capture the state a guard case is judged against.
+# The scenario calls this right before the probe, then guard_enforced after.
+guard_before()
+{
+	GB_INSTANCE=$1
+	GB_MASTER=$(master "$1")
+	GB_WORKERS=$(workers "$1")
+	GB_CRASH=$(crash_lines)
+	events "$H2GUARD" "$H2GUARD_EVENTS" "$W/gb"
+	GB_HITS=$(hits "$W/gb")
+}
+
+# guard_enforced <reason> <label>: after a probe that should have been cut,
+# prove the guard killed the specific worker that handled it. Requires a new
+# hit, a fresh killed record with that reason on one of the instance's
+# workers (guard_before captured them), nginx's own log showing that worker
+# exited on SIGKILL, that worker now gone, the master still alive with a
+# replacement worker, a fresh HTTP/2 200, and no crash signal in the window.
+guard_enforced()
+{
+	reason=$1
+	label=$2
+	inst=$GB_INSTANCE
+	events "$H2GUARD" "$H2GUARD_EVENTS" "$W/ga"
+	now_hits=$(hits "$W/ga")
+	if [ "${now_hits:-0}" -le "${GB_HITS:-0}" ]; then
+		sed 's/^/      | /' "$W/ga"
+		fail "$label: no new guard hit (${GB_HITS:-0} -> ${now_hits:-0})"
+		return
+	fi
+	pid=$(find_fresh_kill "$W/ga" "$reason" "$GB_WORKERS")
+	if [ -z "$pid" ]; then
+		sed 's/^/      | /' "$W/ga"
+		fail "$label: no action=killed event with reason=$reason on a $inst worker"
+		return
+	fi
+	pass "$label: the guard killed the worker that handled it (pid $pid, reason=$reason, action=killed)"
+	ok=0
+	for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+		if worker_exited_on "$pid" 9; then ok=1; break; fi
+		sleep 0.3
+	done
+	check "$label: nginx logged worker $pid exited on SIGKILL (signal 9)" [ "$ok" = 1 ]
+	check "$label: no worker crashed in this case ($(crash_lines) crash signals total)" \
+		[ "$(crash_lines)" = "${GB_CRASH:-0}" ]
+	case " $(workers "$inst" | tr '\n' ' ') " in
+	*" $pid "*) fail "$label: the killed worker $pid is still running" ;;
+	*) pass "$label: the killed worker $pid is gone" ;;
+	esac
+	if [ -n "$GB_MASTER" ] && [ "$(master "$inst")" = "$GB_MASTER" ]; then
+		pass "$label: the $inst master survived (pid $GB_MASTER)"
+	else
+		fail "$label: the $inst master changed ($GB_MASTER -> $(master "$inst"))"
+	fi
+	check "$label: a replacement worker is running" [ -n "$(workers "$inst")" ]
+	status=$(https_status "$(instance_url "$inst")/")
+	check "$label: $inst serves a fresh HTTP/2 request ($status)" [ "$status" = "200 2" ]
+}

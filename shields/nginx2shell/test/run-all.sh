@@ -4,8 +4,9 @@
 # usage: run-all.sh [--narrate] [<scenario>...]
 #
 # Runs the nginx2shell scenarios on a Shirudo target, as root, in the
-# order: baseline (shield not loaded), load, contain, legit, h2guard,
-# intercept, regression, unload. Every scenario runs even when one before it
+# order: selftest (the guard assertion rejects weak evidence), baseline
+# (shield not loaded), load, contain, legit, h2guard, intercept,
+# regression, unload. Every scenario runs even when one before it
 # failed, so that unload always runs. Prints one "SCENARIO <name> PASS"
 # or "FAIL" line each and exits 1 if any failed. --narrate prints a short
 # line before each scenario, for a recording; the demo is this run.
@@ -19,7 +20,7 @@ if [ "${1:-}" = --narrate ]; then
 	narrate=1
 	shift
 fi
-[ $# -gt 0 ] || set -- baseline load contain legit h2guard intercept regression unload
+[ $# -gt 0 ] || set -- selftest baseline load contain legit h2guard intercept regression unload
 
 N2S_OUT=${N2S_OUT:-${SHIELD_OUT:-/var/tmp/nginx2shell-test}}
 export N2S_OUT
@@ -37,6 +38,7 @@ say()
 title()
 {
 	case $1 in
+	selftest) echo "0 · Self-test: the guard assertion rejects a stale kill, a kill_failed and a recorded-only event" ;;
 	baseline) echo "1 · Without the shield: a SIMULATED post-exploit shell runs as the nginx worker" ;;
 	load) echo "2 · Load the Shirudo shield" ;;
 	contain) echo "3 · Same SIMULATED step with the shield: shell, callback and webshell drop refused, nginx keeps serving" ;;
@@ -73,6 +75,11 @@ for scenario in "$@"; do
 done
 
 [ -z "$timer" ] || systemctl start "$timer"
+
+# Keep the nginx worker-lifecycle log with the run's artifacts: the guard
+# scenarios assert a specific worker exited on SIGKILL, and these are the
+# lines they match. SHIELD_OUT is uploaded as part of the VM result.
+sh "$demo" logs >"$N2S_OUT/nginx-error.log" 2>&1 || :
 
 say "Summary"
 printf '%-10s %-6s %s\n' SCENARIO RESULT CHECKS
